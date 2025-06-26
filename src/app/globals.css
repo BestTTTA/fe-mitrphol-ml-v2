@@ -1,0 +1,23 @@
+@import "tailwindcss";
+
+@theme {
+    --color-DEFAULT: #082E6F;
+    --color-SECCOND: #00AEEE;
+    --color-DROPDOWN: #c8c8c8;
+
+    --radius-DEFAULT: 0.5rem;
+    
+    --spacing-DEFAULT: 0.7rem;
+    --spacing-BUTTON: 0.3rem;
+
+    --text-BASE: 12px;
+
+    --font-weight-DEFAULT: 800;
+    
+}
+
+@layer base {
+    html {
+        @apply bg-[#F5F5F5];
+    }
+}

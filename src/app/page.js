@@ -1,10 +1,10 @@
 "use client";
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { useLoadScript } from "@react-google-maps/api";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
 const DEFAULT_LIMIT = 50000000;
-const MAX_MARKERS_PER_ZONE = 10000;
+const MAX_MARKERS_PER_ZONE = 1000000;
 
 // Prediction thresholds (matching backend)
 const PREDICTION_THRESHOLDS = {
@@ -19,18 +19,30 @@ function Map({ center }) {
     googleMapsApiKey: process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY || "",
   });
 
-  // เปลี่ยนเป็นเดือนที่เชื่อมโยงกับปีและ model อัตโนมัติ
-  const monthOptions = [
+  // เปลี่ยนเป็นเดือนที่เชื่อมโยงกับปีและ model อัตโนมัติ - ใช้ useMemo เพื่อป้องกัน re-render
+  const monthOptions = useMemo(() => [
     { value: 12, label: "ธันวาคม", year: 2024, model: "m12" },
     { value: 1, label: "มกราคม", year: 2025, model: "m1" },
     { value: 2, label: "กุมภาพันธ์", year: 2025, model: "m2" },
     { value: 3, label: "มีนาคม", year: 2025, model: "m3" },
-  ];
+  ], []);
 
   // ฟังก์ชันสำหรับหาข้อมูลเดือนที่เลือก
   const getSelectedMonthData = useCallback((selectedMonth) => {
     return monthOptions.find((month) => month.value === selectedMonth);
   }, [monthOptions]);
+
+  // Zone centers - ใช้ useMemo เพื่อป้องกัน re-render
+  const zoneCenters = useMemo(() => ({
+    SB: { lat: 14.862504078842958, lng: 100.358549932741414 },
+    MPDC: { lat: 14.84514, lng: 99.75922 },
+    MAC: { lat: 15.828701000429223, lng: 104.47471520283926 },
+    MPV: { lat: 16.67827120388637, lng: 102.44576336099253 },
+    MPL: { lat: 7.067065149704857, lng: 117.59963900704362 },
+    MPK: { lat: 16.4840064769643, lng: 102.1212705588527 },
+    MKS: { lat: 16.462588608501633, lng: 104.04029264983633 },
+    MKB: { lat: 16.096672809152835, lng: 101.87271858619893 },
+  }), []);
 
   // State for filters
   const [filters, setFilters] = useState({
@@ -46,8 +58,8 @@ function Map({ center }) {
 
   const [appliedFilters, setAppliedFilters] = useState(null);
   const [selectedMonth, setSelectedMonth] = useState(12);
-  const [useGroupedAPI, setUseGroupedAPI] = useState(true);
-  const [dataLimit, setDataLimit] = useState(DEFAULT_LIMIT);
+  const [useGroupedAPI] = useState(true); // Remove setter เพื่อป้องกัน re-render
+  const [dataLimit] = useState(DEFAULT_LIMIT); // Remove setter เพื่อป้องกัน re-render
   const [focusedZone, setFocusedZone] = useState(null);
   const [mapInstance, setMapInstance] = useState(null);
   const [predictionData, setPredictionData] = useState(null);
@@ -60,18 +72,6 @@ function Map({ center }) {
 
   // เก็บ reference ของ markers เพื่อ cleanup
   const markersRef = useRef([]);
-
-  const zoneCenters = {
-    SB: { lat: 14.862504078842958, lng: 100.358549932741414 },
-    MPDC: { lat: 14.84514, lng: 99.75922 },
-    MAC: { lat: 15.828701000429223, lng: 104.47471520283926 },
-    MPV: { lat: 16.67827120388637, lng: 102.44576336099253 },
-    MPL: { lat: 7.067065149704857, lng: 117.59963900704362 },
-    MPK: { lat: 16.4840064769643, lng: 102.1212705588527 },
-    MKS: { lat: 16.462588608501633, lng: 104.04029264983633 },
-    MKB: { lat: 16.096672809152835, lng: 101.87271858619893 },
-  };
-
   const mapRef = useRef(null);
 
   // ฟังก์ชัน cleanup markers เพื่อลด memory leak
@@ -274,12 +274,59 @@ function Map({ center }) {
     await fetchPredictionData(filters);
   }, [filters, clearAllMarkers, fetchPredictionData]);
 
-  // Initial load
+  // Handle filter changes
+  const handleFilterChange = useCallback((key, value) => {
+    setFilters((prev) => ({
+      ...prev,
+      [key]: value,
+    }));
+  }, []);
+
+  const handleMonthChange = useCallback((month) => {
+    setSelectedMonth(month);
+  }, []);
+
+  const handleZoneFocus = useCallback(
+    (zoneName) => {
+      setFocusedZone(zoneName);
+      setFilters((prev) => ({
+        ...prev,
+        zones: zoneName,
+      }));
+
+      if (mapInstance && zoneCenters[zoneName]) {
+        mapInstance.panTo(zoneCenters[zoneName]);
+        mapInstance.setZoom(10);
+      }
+    },
+    [mapInstance, zoneCenters]
+  );
+
+  const resetZoneFocus = useCallback(() => {
+    setFocusedZone(null);
+    setFilters((prev) => ({
+      ...prev,
+      zones: "MAC,MKB,MKS,MPDC,MPK,MPL,MPV,SB",
+    }));
+
+    if (mapInstance) {
+      mapInstance.panTo(center || { lat: 15.87, lng: 100.9925 });
+      mapInstance.setZoom(7);
+    }
+  }, [mapInstance, center]);
+
+  // Initial load - แก้ไข dependency
   useEffect(() => {
-    if (!appliedFilters) {
+    let mounted = true;
+    
+    if (!appliedFilters && mounted) {
       applyFilters();
     }
-  }, [applyFilters, appliedFilters]);
+    
+    return () => {
+      mounted = false;
+    };
+  }, []); // Empty dependency array - เรียกเพียงครั้งเดียว
 
   // Cleanup markers on unmount
   useEffect(() => {
@@ -288,10 +335,10 @@ function Map({ center }) {
     };
   }, [clearAllMarkers]);
 
-  // Track filter changes
+  // Track filter changes - แก้ไข dependency
   useEffect(() => {
     if (appliedFilters) {
-      const filterKeys = ["year", "selected_month", "models", "zones", "limit", "group_by_level"];
+      const filterKeys = ["year", "selected_month", "models", "zones", "limit"];
       const hasChanges = filterKeys.some((key) => {
         if (key === "models") {
           return (
@@ -301,13 +348,11 @@ function Map({ center }) {
         return filters[key] !== appliedFilters[key];
       });
 
-      if (hasChanges) {
-        setHasUnappliedChanges(true);
-      }
+      setHasUnappliedChanges(hasChanges);
     }
   }, [filters, appliedFilters]);
 
-  // Update filters when month selection changes
+  // Update filters when month selection changes - แก้ไข dependency
   useEffect(() => {
     const monthData = getSelectedMonthData(selectedMonth);
     if (monthData) {
@@ -318,9 +363,9 @@ function Map({ center }) {
         models: [monthData.model],
       }));
     }
-  }, [selectedMonth, getSelectedMonthData]);
+  }, [selectedMonth]); // เอา getSelectedMonthData ออก
 
-  // Initialize map with prediction markers
+  // Initialize map with prediction markers - แก้ไข dependency
   useEffect(() => {
     if (!isLoaded || loadError || !predictionData) return;
 
@@ -491,52 +536,10 @@ function Map({ center }) {
     loadError,
     predictionData,
     center,
-    appliedFilters,
-    clearAllMarkers,
-    getPredictionMarkerIcon,
-    getPredictionLevel,
+    zoneCenters,
     useGroupedAPI,
+    // เอา functions ออกจาก dependency เพื่อป้องกัน infinite loop
   ]);
-
-  const handleFilterChange = useCallback((key, value) => {
-    setFilters((prev) => ({
-      ...prev,
-      [key]: value,
-    }));
-  }, []);
-
-  const handleMonthChange = useCallback((month) => {
-    setSelectedMonth(month);
-  }, []);
-
-  const handleZoneFocus = useCallback(
-    (zoneName) => {
-      setFocusedZone(zoneName);
-      setFilters((prev) => ({
-        ...prev,
-        zones: zoneName,
-      }));
-
-      if (mapInstance && zoneCenters[zoneName]) {
-        mapInstance.panTo(zoneCenters[zoneName]);
-        mapInstance.setZoom(10);
-      }
-    },
-    [mapInstance]
-  );
-
-  const resetZoneFocus = useCallback(() => {
-    setFocusedZone(null);
-    setFilters((prev) => ({
-      ...prev,
-      zones: "MAC,MKB,MKS,MPDC,MPK,MPL,MPV,SB",
-    }));
-
-    if (mapInstance) {
-      mapInstance.panTo(center || { lat: 15.87, lng: 100.9925 });
-      mapInstance.setZoom(7);
-    }
-  }, [mapInstance, center]);
 
   if (!isLoaded) {
     return (
@@ -584,67 +587,11 @@ function Map({ center }) {
         </div>
       )}
 
-      {/* Cache Info */}
-      {/* {cacheInfo && (
-        <div className="bg-green-50 border border-green-200 p-4 rounded-lg">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <span className="text-green-600">⚡ Data loaded from cache</span>
-              <span className="text-xs text-green-700 bg-green-100 px-2 py-1 rounded">
-                {cacheInfo.timestamp}
-              </span>
-            </div>
-            <button
-              onClick={clearCache}
-              className="text-sm text-green-700 hover:text-green-800 underline"
-            >
-              Clear Cache
-            </button>
-          </div>
-          <div className="text-xs text-green-600 mt-1">
-            Cache Key: {cacheInfo.cache_key}
-          </div>
-        </div>
-      )} */}
-
       {/* Combined Filters and Zone Selection */}
       <div className="bg-white p-4 rounded-lg shadow">
         <h3 className="text-lg font-semibold mb-4">
           Prediction Filters & Zone Selection
         </h3>
-
-        {/* API Type Selection */}
-        {/* <div className="mb-6">
-          <label className="block text-sm font-medium mb-2">API Type</label>
-          <div className="flex gap-4">
-            <label className="flex items-center">
-              <input
-                type="radio"
-                name="apiType"
-                checked={useGroupedAPI}
-                onChange={() => setUseGroupedAPI(true)}
-                className="mr-2"
-              />
-              <span className="text-sm">Grouped API (Recommended)</span>
-            </label>
-            <label className="flex items-center">
-              <input
-                type="radio"
-                name="apiType"
-                checked={!useGroupedAPI}
-                onChange={() => setUseGroupedAPI(false)}
-                className="mr-2"
-              />
-              <span className="text-sm">Regular API</span>
-            </label>
-          </div>
-          <div className="text-xs text-gray-500 mt-1">
-            {useGroupedAPI 
-              ? "Uses /predict/grouped endpoint with better performance and caching"
-              : "Uses /predict endpoint (original behavior)"
-            }
-          </div>
-        </div> */}
 
         {/* Month Filter */}
         <div className="mb-6">
@@ -662,35 +609,13 @@ function Map({ center }) {
           </select>
           <div className="text-xs text-gray-500 mt-1">
             {(() => {
-              const monthData = getSelectedMonthData(selectedMonth);
+              const monthData = monthOptions.find(m => m.value === selectedMonth);
               return monthData
                 ? `ปี: ${monthData.year} | Model: ${monthData.model.toUpperCase()} | Data range: Feb-Aug`
                 : "Data range: Feb-Aug (fixed)";
             })()}
           </div>
         </div>
-
-        {/* Data Limit Filter */}
-        {/* <div className="mb-6">
-          <label className="block text-sm font-medium mb-1">Data Limit</label>
-          <select
-            value={dataLimit}
-            onChange={(e) => {
-              const newLimit = parseInt(e.target.value);
-              setDataLimit(newLimit);
-              handleFilterChange("limit", newLimit);
-            }}
-            className="w-full md:w-1/2 p-2 border rounded"
-          >
-            <option value={10000}>10,000 records (Fast)</option>
-            <option value={25000}>25,000 records (Medium)</option>
-            <option value={50000}>50,000 records (Recommended)</option>
-            <option value={100000}>100,000 records (Slow)</option>
-          </select>
-          <div className="text-xs text-gray-500 mt-1">
-            Higher limits may affect performance. Cached requests load instantly.
-          </div>
-        </div> */}
 
         {/* Zone Selection */}
         <div>
@@ -933,7 +858,7 @@ function Map({ center }) {
             Please modify your filters and click &quot;Apply Changes&quot; to try again.
           </p>
           <p className="text-blue-600 text-xs mt-1">
-            💡 Try selecting a different month, reducing the data limit, or switching to {useGroupedAPI ? 'regular' : 'grouped'} API for better performance.
+            💡 Try selecting a different month for better performance.
           </p>
         </div>
       )}
@@ -980,41 +905,6 @@ function Map({ center }) {
           )}
         </div>
       </div>
-
-      {/* API Status and Performance Info */}
-      {/* <div className="bg-white p-4 rounded-lg shadow">
-        <h3 className="text-lg font-semibold mb-4">API Performance & Status</h3>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <div className="text-center">
-            <div className="text-2xl font-bold text-blue-600">
-              {useGroupedAPI ? 'Grouped' : 'Regular'}
-            </div>
-            <div className="text-sm text-gray-600">API Type</div>
-          </div>
-          <div className="text-center">
-            <div className="text-2xl font-bold text-green-600">
-              {dataLimit.toLocaleString()}
-            </div>
-            <div className="text-sm text-gray-600">Record Limit</div>
-          </div>
-          <div className="text-center">
-            <div className="text-2xl font-bold text-purple-600">
-              {markersRef.current.length.toLocaleString()}
-            </div>
-            <div className="text-sm text-gray-600">Map Markers</div>
-          </div>
-        </div>
-        
-        <div className="mt-4 p-3 bg-gray-50 rounded-lg">
-          <h4 className="font-medium mb-2">Performance Tips:</h4>
-          <ul className="text-sm text-gray-700 space-y-1">
-            <li>• Use <strong>Grouped API</strong> for better performance and caching</li>
-            <li>• Cached requests load instantly (look for ⚡ cache indicator)</li>
-            <li>• Lower data limits improve response times</li>
-            <li>• Focus on specific zones to reduce markers count</li>
-          </ul>
-        </div>
-      </div> */}
 
       {/* Map */}
       <div className="w-full">

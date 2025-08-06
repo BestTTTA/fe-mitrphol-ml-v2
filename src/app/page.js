@@ -612,7 +612,7 @@ function Map({ center }) {
       )}
 
       {/* Cache Info */}
-      {cacheInfo && (
+      {/* {cacheInfo && (
         <div className="bg-green-50 border border-green-200 p-3 rounded-lg">
           <div className="flex items-center justify-between">
             <div>
@@ -627,7 +627,7 @@ function Map({ center }) {
             </button>
           </div>
         </div>
-      )}
+      )} */}
 
       {/* Combined Filters and Zone Selection */}
       <div className="bg-white p-4 rounded-lg shadow">

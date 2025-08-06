@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { useLoadScript } from "@react-google-maps/api";
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:1256";
 const DEFAULT_LIMIT = 50000000;
 const MAX_MARKERS_PER_ZONE = 1000000;
 
@@ -50,6 +50,7 @@ function Map({ center }) {
     start_month: 2,
     end_month: 8,
     selected_month: 12,
+    display_month: 6, // เพิ่ม display_month parameter
     models: ["m12"],
     zones: "MAC,MKB,MKS,MPDC,MPK,MPL,MPV,SB",
     limit: DEFAULT_LIMIT,
@@ -58,8 +59,9 @@ function Map({ center }) {
 
   const [appliedFilters, setAppliedFilters] = useState(null);
   const [selectedMonth, setSelectedMonth] = useState(12);
-  const [useGroupedAPI] = useState(true); // Remove setter เพื่อป้องกัน re-render
-  const [dataLimit] = useState(DEFAULT_LIMIT); // Remove setter เพื่อป้องกัน re-render
+  const [displayMonth, setDisplayMonth] = useState(6); // เพิ่ม state สำหรับ display month
+  const [useGroupedAPI] = useState(true);
+  const [dataLimit] = useState(DEFAULT_LIMIT);
   const [focusedZone, setFocusedZone] = useState(null);
   const [mapInstance, setMapInstance] = useState(null);
   const [predictionData, setPredictionData] = useState(null);
@@ -173,6 +175,7 @@ function Map({ center }) {
           models: filtersToUse.models,
           zones: filtersToUse.zones,
           limit: filtersToUse.limit,
+          display_month: filtersToUse.display_month // ใช้ display_month จาก filters
         };
 
         if (useGroupedAPI) {
@@ -237,7 +240,16 @@ function Map({ center }) {
           setLoadingStage("");
         }, 1000);
       } catch (err) {
-        setError(err.message);
+        let errorMessage = err.message;
+        
+        // Handle specific error cases
+        if (err.message.includes("Failed to fetch") || err.message.includes("ERR_CONNECTION_REFUSED")) {
+          errorMessage = `Cannot connect to API server at ${API_BASE_URL}. Please ensure the server is running.`;
+        } else if (err.message === "400") {
+          errorMessage = "Invalid request parameters. Please check your filter settings.";
+        }
+        
+        setError(errorMessage);
         console.error("Error fetching prediction data:", err);
         setLoadingProgress(0);
         setLoadingStage("");
@@ -286,6 +298,15 @@ function Map({ center }) {
     setSelectedMonth(month);
   }, []);
 
+  // เพิ่ม handler สำหรับ display month
+  const handleDisplayMonthChange = useCallback((month) => {
+    setDisplayMonth(month);
+    setFilters((prev) => ({
+      ...prev,
+      display_month: month,
+    }));
+  }, []);
+
   const handleZoneFocus = useCallback(
     (zoneName) => {
       setFocusedZone(zoneName);
@@ -326,7 +347,7 @@ function Map({ center }) {
     return () => {
       mounted = false;
     };
-  }, []); // Empty dependency array - เรียกเพียงครั้งเดียว
+  }, []); // ลบ applyFilters จาก dependency array เพื่อป้องกัน infinite loop
 
   // Cleanup markers on unmount
   useEffect(() => {
@@ -338,7 +359,7 @@ function Map({ center }) {
   // Track filter changes - แก้ไข dependency
   useEffect(() => {
     if (appliedFilters) {
-      const filterKeys = ["year", "selected_month", "models", "zones", "limit"];
+      const filterKeys = ["year", "selected_month", "display_month", "models", "zones", "limit"];
       const hasChanges = filterKeys.some((key) => {
         if (key === "models") {
           return (
@@ -363,7 +384,7 @@ function Map({ center }) {
         models: [monthData.model],
       }));
     }
-  }, [selectedMonth]); // เอา getSelectedMonthData ออก
+  }, [selectedMonth, getSelectedMonthData]); // เพิ่ม getSelectedMonthData เข้า dependency array
 
   // Initialize map with prediction markers - แก้ไข dependency
   useEffect(() => {
@@ -482,6 +503,7 @@ function Map({ center }) {
                         <p style="margin: 2px 0;"><strong>Plant ID:</strong> ${prediction.plant_id}</p>
                         <p style="margin: 2px 0;"><strong>Cane Type:</strong> ${prediction.cane_type}</p>
                         ${prediction.prediction_level ? `<p style="margin: 2px 0;"><strong>Level:</strong> ${prediction.prediction_level}</p>` : ''}
+                        ${prediction.display_month ? `<p style="margin: 2px 0;"><strong>Display Data From:</strong> ${prediction.display_month_name || `Month ${prediction.display_month}`}</p>` : ''}
                       </div>
                       <div style="margin-bottom: 8px;">
                         <strong>Prediction Details:</strong><br/>
@@ -493,7 +515,7 @@ function Map({ center }) {
                         </span>
                       </div>
                       <div style="margin-bottom: 8px;">
-                        <strong>Vegetation Indices:</strong><br/>
+                        <strong>Vegetation Indices ${prediction.display_month_name ? `(${prediction.display_month_name})` : ''}:</strong><br/>
                         <span style="display: inline-block; margin: 1px 2px; padding: 2px 4px; background-color: #f3f4f6; border-radius: 2px; font-size: 11px;">
                           NDVI: ${prediction.ndvi ? parseFloat(prediction.ndvi).toFixed(3) : "N/A"}
                         </span>
@@ -538,8 +560,10 @@ function Map({ center }) {
     center,
     zoneCenters,
     useGroupedAPI,
-    // เอา functions ออกจาก dependency เพื่อป้องกัน infinite loop
-  ]);
+    clearAllMarkers,
+    getPredictionLevel,
+    getPredictionMarkerIcon,
+  ]); // เพิ่ม missing dependencies
 
   if (!isLoaded) {
     return (
@@ -587,6 +611,24 @@ function Map({ center }) {
         </div>
       )}
 
+      {/* Cache Info */}
+      {cacheInfo && (
+        <div className="bg-green-50 border border-green-200 p-3 rounded-lg">
+          <div className="flex items-center justify-between">
+            <div>
+              <h4 className="text-green-800 font-medium">Data from Cache</h4>
+              <p className="text-green-700 text-sm">Loaded at {cacheInfo.timestamp}</p>
+            </div>
+            <button
+              onClick={clearCache}
+              className="text-sm text-green-700 hover:text-green-900 underline"
+            >
+              Clear Cache
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Combined Filters and Zone Selection */}
       <div className="bg-white p-4 rounded-lg shadow">
         <h3 className="text-lg font-semibold mb-4">
@@ -594,8 +636,8 @@ function Map({ center }) {
         </h3>
 
         {/* Month Filter */}
-        <div className="mb-6">
-          <label className="block text-sm font-medium mb-2">เดือน</label>
+        <div className="mb-4">
+          <label className="block text-sm font-medium mb-2">เดือนสำหรับ Model Selection</label>
           <select
             value={selectedMonth}
             onChange={(e) => handleMonthChange(parseInt(e.target.value))}
@@ -616,6 +658,27 @@ function Map({ center }) {
             })()}
           </div>
         </div>
+
+        {/* Display Month Filter */}
+        {/* <div className="mb-6">
+          <label className="block text-sm font-medium mb-2">
+            เดือนที่ต้องการแสดงข้อมูล Features
+          </label>
+          <select
+            value={displayMonth}
+            onChange={(e) => handleDisplayMonthChange(parseInt(e.target.value))}
+            className="w-full md:w-1/2 p-2 border rounded"
+          >
+            {monthOptions.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+          <div className="text-xs text-gray-500 mt-1">
+            ข้อมูล vegetation indices และ precipitation จะแสดงจากเดือนที่เลือก
+          </div>
+        </div> */}
 
         {/* Zone Selection */}
         <div>
@@ -672,6 +735,9 @@ function Map({ center }) {
                   Grouped API
                 </span>
               )}
+              <span className="text-xs bg-purple-100 text-purple-700 px-2 py-1 rounded">
+                Display: Month {displayMonth}
+              </span>
             </div>
           </div>
 
@@ -903,6 +969,9 @@ function Map({ center }) {
               🚀 Using Grouped API for better performance and automatic caching.
             </span>
           )}
+          <span className="block mt-1">
+            📊 Features data displayed from Month {displayMonth} ({monthOptions.find(m => m.value === displayMonth)?.label || 'Unknown'})
+          </span>
         </div>
       </div>
 

@@ -861,7 +861,7 @@ function Map({ center }) {
               : `Error loading prediction data: ${error}`}
           </p>
           <p className="text-red-500 text-sm mt-1">
-            Please modify your filters and click "Apply Changes" to try again.
+            Please modify your filters and click &quot;Apply Changes&quot; to try again.
           </p>
           <p className="text-blue-600 text-xs mt-1">
             💡 Try selecting a different month or reducing the data limit for

@@ -1,12 +1,18 @@
 "use client";
-import { useEffect, useRef, useState, useCallback, useMemo } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { useLoadScript } from "@react-google-maps/api";
 
-const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:7890";
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
+const DEFAULT_LIMIT = 50000000;
+const MAX_MARKERS_PER_ZONE = 10000;
 
-const DEFAULT_LIMIT = 500000000;
-const MAX_MARKERS_PER_ZONE = 500000000;
+// Prediction thresholds (matching backend)
+const PREDICTION_THRESHOLDS = {
+  HIGH_MIN: 12.0,
+  MEDIUM_MIN: 10.0,
+  MEDIUM_MAX: 12.0,
+  LOW_MAX: 10.0
+};
 
 function Map({ center }) {
   const { isLoaded, loadError } = useLoadScript({
@@ -24,35 +30,32 @@ function Map({ center }) {
   // ฟังก์ชันสำหรับหาข้อมูลเดือนที่เลือก
   const getSelectedMonthData = useCallback((selectedMonth) => {
     return monthOptions.find((month) => month.value === selectedMonth);
-  }, []);
+  }, [monthOptions]);
 
-  // State for filters - ปรับให้เหมาะกับ prediction API ใหม่
+  // State for filters
   const [filters, setFilters] = useState({
-    year: 2024, // จะเปลี่ยนตามเดือนที่เลือก
-    start_month: 2, // fix ไว้ที่ 2
-    end_month: 8, // fix ไว้ที่ 8
-    selected_month: 12, // เดือนที่เลือกแสดงในหน้าเว็บ
-    models: ["m12"], // จะเปลี่ยนตามเดือนที่เลือก
+    year: 2024,
+    start_month: 2,
+    end_month: 8,
+    selected_month: 12,
+    models: ["m12"],
     zones: "MAC,MKB,MKS,MPDC,MPK,MPL,MPV,SB",
     limit: DEFAULT_LIMIT,
-    _t: Date.now(),
-    no_cache: true,
+    group_by_level: true,
   });
 
   const [appliedFilters, setAppliedFilters] = useState(null);
   const [selectedMonth, setSelectedMonth] = useState(12);
-
-  // เพิ่ม state สำหรับการจัดการ performance
+  const [useGroupedAPI, setUseGroupedAPI] = useState(true);
   const [dataLimit, setDataLimit] = useState(DEFAULT_LIMIT);
-
   const [focusedZone, setFocusedZone] = useState(null);
   const [mapInstance, setMapInstance] = useState(null);
-  const [predictionData, setPredictionData] = useState(null); // เปลี่ยนจาก analyticsData
+  const [predictionData, setPredictionData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [loadingProgress, setLoadingProgress] = useState(0);
   const [loadingStage, setLoadingStage] = useState("");
   const [error, setError] = useState(null);
-
+  const [cacheInfo, setCacheInfo] = useState(null);
   const [hasUnappliedChanges, setHasUnappliedChanges] = useState(false);
 
   // เก็บ reference ของ markers เพื่อ cleanup
@@ -84,7 +87,6 @@ function Map({ center }) {
   // ฟังก์ชันสำหรับ sampling ข้อมูลเพื่อลด markers
   const sampleData = useCallback((records, maxCount) => {
     if (!records || records.length <= maxCount) return records;
-
     const step = Math.ceil(records.length / maxCount);
     return records.filter((_, index) => index % step === 0);
   }, []);
@@ -106,12 +108,50 @@ function Map({ center }) {
     }
   }, []);
 
-  // Fetch prediction data - เปลี่ยนจาก analytics เป็น prediction
+  // ฟังก์ชันสำหรับกำหนดระดับ prediction ตามเกณฑ์ใหม่
+  const getPredictionLevel = useCallback((predictionValue) => {
+    if (predictionValue > PREDICTION_THRESHOLDS.HIGH_MIN) {
+      return {
+        level: "High",
+        color: "#22c55e",
+        bgColor: "#f0fdf4",
+        borderColor: "#bbf7d0",
+      };
+    } else if (predictionValue < PREDICTION_THRESHOLDS.LOW_MAX) {
+      return {
+        level: "Low",
+        color: "#ef4444",
+        bgColor: "#fef2f2",
+        borderColor: "#fecaca",
+      };
+    } else {
+      return {
+        level: "Medium",
+        color: "#f59e0b",
+        bgColor: "#fffbeb",
+        borderColor: "#fed7aa",
+      };
+    }
+  }, []);
+
+  // ฟังก์ชันสำหรับกำหนดสีและไอคอนตาม prediction level
+  const getPredictionMarkerIcon = useCallback((predictionValue) => {
+    if (predictionValue > PREDICTION_THRESHOLDS.HIGH_MIN) {
+      return "http://maps.google.com/mapfiles/ms/icons/green-dot.png";
+    } else if (predictionValue < PREDICTION_THRESHOLDS.LOW_MAX) {
+      return "http://maps.google.com/mapfiles/ms/icons/red-dot.png";
+    } else {
+      return "http://maps.google.com/mapfiles/ms/icons/yellow-dot.png";
+    }
+  }, []);
+
+  // Fetch prediction data
   const fetchPredictionData = useCallback(
     async (filtersToUse) => {
       setLoading(true);
       setError(null);
       setLoadingProgress(0);
+      setCacheInfo(null);
 
       try {
         const stages = [
@@ -123,29 +163,29 @@ function Map({ center }) {
         ];
 
         simulateLoadingProgress(stages);
-
         setLoadingStage("Fetching prediction data...");
         setLoadingProgress(50);
 
-        // เตรียม body สำหรับ POST request
         const requestBody = {
           year: filtersToUse.year,
-          start_month: filtersToUse.start_month, // fix ที่ 2
-          end_month: filtersToUse.end_month, // fix ที่ 8
+          start_month: filtersToUse.start_month,
+          end_month: filtersToUse.end_month,
           models: filtersToUse.models,
           zones: filtersToUse.zones,
           limit: filtersToUse.limit,
         };
 
-        console.log(`Fetching predictions with:`, requestBody);
+        if (useGroupedAPI) {
+          requestBody.group_by_level = filtersToUse.group_by_level;
+        }
 
-        const response = await fetch(`${API_BASE_URL}/predict`, {
+        const endpoint = useGroupedAPI ? "/predict/grouped" : "/predict";
+        console.log(`Fetching predictions from ${endpoint} with:`, requestBody);
+
+        const response = await fetch(`${API_BASE_URL}${endpoint}`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "Cache-Control": "no-cache, no-store, must-revalidate",
-            Pragma: "no-cache",
-            Expires: "0",
           },
           body: JSON.stringify(requestBody),
         });
@@ -163,19 +203,32 @@ function Map({ center }) {
 
         const data = await response.json();
 
+        if (data.cached) {
+          setCacheInfo({
+            cached: data.cached,
+            cache_key: data.cache_key,
+            timestamp: new Date().toLocaleString()
+          });
+        }
+
         setLoadingProgress(85);
         setLoadingStage("Optimizing markers...");
 
-        // Optimize data by sampling if needed
         if (data.results && data.results.length > 0) {
-          data.results = data.results.map((result) => ({
-            ...result,
-            predictions: sampleData(result.predictions, MAX_MARKERS_PER_ZONE),
-          }));
+          data.results = data.results.map((result) => {
+            if (useGroupedAPI && result.prediction_groups) {
+              result.prediction_groups = result.prediction_groups.map(group => ({
+                ...group,
+                predictions: sampleData(group.predictions, MAX_MARKERS_PER_ZONE)
+              }));
+            } else if (result.predictions) {
+              result.predictions = sampleData(result.predictions, MAX_MARKERS_PER_ZONE);
+            }
+            return result;
+          });
         }
 
         setPredictionData(data);
-
         setLoadingProgress(100);
         setLoadingStage("Complete!");
 
@@ -192,18 +245,32 @@ function Map({ center }) {
         setLoading(false);
       }
     },
-    [simulateLoadingProgress, sampleData]
+    [simulateLoadingProgress, sampleData, useGroupedAPI]
   );
+
+  // Clear cache function
+  const clearCache = useCallback(async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/cache/clear`, {
+        method: "DELETE",
+      });
+      
+      if (response.ok) {
+        const result = await response.json();
+        console.log("Cache cleared:", result);
+        setCacheInfo(null);
+      }
+    } catch (err) {
+      console.error("Error clearing cache:", err);
+    }
+  }, []);
 
   // Apply filters function
   const applyFilters = useCallback(async () => {
     setHasUnappliedChanges(false);
     setAppliedFilters({ ...filters });
-
-    // Clear existing markers
     clearAllMarkers();
     setPredictionData(null);
-
     await fetchPredictionData(filters);
   }, [filters, clearAllMarkers, fetchPredictionData]);
 
@@ -224,7 +291,7 @@ function Map({ center }) {
   // Track filter changes
   useEffect(() => {
     if (appliedFilters) {
-      const filterKeys = ["year", "selected_month", "models", "zones", "limit"];
+      const filterKeys = ["year", "selected_month", "models", "zones", "limit", "group_by_level"];
       const hasChanges = filterKeys.some((key) => {
         if (key === "models") {
           return (
@@ -249,23 +316,9 @@ function Map({ center }) {
         year: monthData.year,
         selected_month: selectedMonth,
         models: [monthData.model],
-        _t: Date.now(),
-        no_cache: true,
       }));
     }
   }, [selectedMonth, getSelectedMonthData]);
-
-  // ฟังก์ชันสำหรับกำหนดสีและไอคอนตาม prediction level ใช้ค่าคงที่
-  const getPredictionMarkerIcon = useCallback((predictionValue) => {
-    // ใช้เกณฑ์คงที่แทนการเปรียบเทียบกับค่าเฉลี่ย
-    if (predictionValue > 12) {
-      return "http://maps.google.com/mapfiles/ms/icons/green-dot.png"; // High prediction - เขียว
-    } else if (predictionValue < 10) {
-      return "http://maps.google.com/mapfiles/ms/icons/red-dot.png"; // Low prediction - แดง
-    } else {
-      return "http://maps.google.com/mapfiles/ms/icons/yellow-dot.png"; // Medium prediction - เหลือง
-    }
-  }, []);
 
   // Initialize map with prediction markers
   useEffect(() => {
@@ -273,7 +326,6 @@ function Map({ center }) {
 
     const initializeMap = () => {
       if (mapRef.current && window.google && window.google.maps) {
-        // Clear existing markers first
         clearAllMarkers();
 
         const map = new window.google.maps.Map(mapRef.current, {
@@ -284,11 +336,9 @@ function Map({ center }) {
 
         setMapInstance(map);
 
-        // Process each model's results
         if (predictionData.results && predictionData.results.length > 0) {
           predictionData.results.forEach((modelResult) => {
             const modelName = modelResult.model_name;
-            const averagePrediction = modelResult.overall_average || 12.5;
 
             // Add zone statistics markers
             if (modelResult.zone_statistics) {
@@ -315,47 +365,18 @@ function Map({ center }) {
 
                 const zoneInfoContent = `
                   <div style="max-width: 300px;">
-                    <h3 style="margin: 0 0 10px 0; color: #333;">Zone: ${
-                      zoneStat.zone
-                    } - ${modelName}</h3>
+                    <h3 style="margin: 0 0 10px 0; color: #333;">Zone: ${zoneStat.zone} - ${modelName}</h3>
                     <div style="margin-bottom: 10px;">
                       <strong>Prediction Statistics:</strong><br/>
                       Total Plantations: ${zoneStat.total_plantations}<br/>
-                      High Prediction: ${
-                        zoneStat.high_prediction_count
-                      } (${zoneStat.high_prediction_percentage.toFixed(
-                  1
-                )}%)<br/>
-                      Medium Prediction: ${
-                        zoneStat.medium_prediction_count
-                      } (${zoneStat.medium_prediction_percentage.toFixed(
-                  1
-                )}%)<br/>
-                      Low Prediction: ${
-                        zoneStat.low_prediction_count
-                      } (${zoneStat.low_prediction_percentage.toFixed(1)}%)
+                      High Prediction (>12): ${zoneStat.high_prediction_count} (${zoneStat.high_prediction_percentage.toFixed(1)}%)<br/>
+                      Medium Prediction (10-12): ${zoneStat.medium_prediction_count} (${zoneStat.medium_prediction_percentage.toFixed(1)}%)<br/>
+                      Low Prediction (<10): ${zoneStat.low_prediction_count} (${zoneStat.low_prediction_percentage.toFixed(1)}%)
                     </div>
                     <div style="margin-bottom: 10px;">
-                      <strong>Average Prediction:</strong> ${zoneStat.average_prediction.toFixed(
-                        2
-                      )}
+                      <strong>Average Prediction:</strong> ${zoneStat.average_prediction.toFixed(2)}
                     </div>
-                    <div>
-            <label className="block text-sm font-medium mb-1">Data Limit</label>
-            <select
-              value={dataLimit}
-              onChange={(e) => handleFilterChange("limit", parseInt(e.target.value))}
-              className="w-full p-2 border rounded"
-            >
-              <option value={10000}>10,000 records (Fast)</option>
-              <option value={50000}>50,000 records (Medium)</option>
-              <option value={100000}>100,000 records (Slow)</option>
-              <option value={DEFAULT_LIMIT}>Unlimited (Very Slow)</option>
-            </select>
-            <div className="text-xs text-gray-500 mt-1">
-              Higher limits may affect performance
-            </div>
-          </div>
+                    <div style="font-size: 12px; color: #666;">
                       <strong>Location:</strong><br/>
                       Lat: ${zoneCenter.lat}<br/>
                       Lng: ${zoneCenter.lng}
@@ -374,17 +395,25 @@ function Map({ center }) {
             }
 
             // Add individual prediction markers
-            if (modelResult.predictions && modelResult.predictions.length > 0) {
-              modelResult.predictions.forEach((prediction, index) => {
+            let allPredictions = [];
+            
+            if (useGroupedAPI && modelResult.prediction_groups) {
+              modelResult.prediction_groups.forEach(group => {
+                allPredictions = allPredictions.concat(group.predictions);
+              });
+            } else if (modelResult.predictions) {
+              allPredictions = modelResult.predictions;
+            }
+
+            if (allPredictions && allPredictions.length > 0) {
+              allPredictions.forEach((prediction, index) => {
                 if (
                   prediction.lat &&
                   prediction.lon &&
                   index < MAX_MARKERS_PER_ZONE
                 ) {
-                  const predictionIcon = getPredictionMarkerIcon(
-                    prediction.prediction,
-                    averagePrediction
-                  );
+                  const predictionIcon = getPredictionMarkerIcon(prediction.prediction);
+                  const predictionLevel = getPredictionLevel(prediction.prediction);
 
                   const predictionMarker = new window.google.maps.Marker({
                     position: {
@@ -392,115 +421,56 @@ function Map({ center }) {
                       lng: parseFloat(prediction.lon),
                     },
                     map,
-                    title: `${
-                      prediction.zone
-                    } - ${modelName} - Prediction: ${prediction.prediction.toFixed(
-                      2
-                    )}`,
+                    title: `${prediction.zone} - ${modelName} - Prediction: ${prediction.prediction.toFixed(2)}`,
                     icon: predictionIcon,
                   });
                   markersRef.current.push(predictionMarker);
 
-                  // Create info window for individual predictions
-                  const predictionLevel =
-                    prediction.prediction >= averagePrediction * 1.1
-                      ? {
-                          level: "High",
-                          color: "#22c55e",
-                          bgColor: "#f0fdf4",
-                          borderColor: "#bbf7d0",
-                        }
-                      : prediction.prediction <= averagePrediction * 0.9
-                      ? {
-                          level: "Low",
-                          color: "#ef4444",
-                          bgColor: "#fef2f2",
-                          borderColor: "#fecaca",
-                        }
-                      : {
-                          level: "Medium",
-                          color: "#f59e0b",
-                          bgColor: "#fffbeb",
-                          borderColor: "#fed7aa",
-                        };
-
                   const predictionInfoContent = `
                     <div style="max-width: 350px;">
-                      <h4 style="margin: 0 0 8px 0; color: ${
-                        predictionLevel.color
-                      }; font-weight: bold;">
+                      <h4 style="margin: 0 0 8px 0; color: ${predictionLevel.color}; font-weight: bold;">
                         📊 ${predictionLevel.level} Prediction
                       </h4>
-                      <div style="background-color: ${
-                        predictionLevel.bgColor
-                      }; padding: 8px; border-radius: 4px; margin-bottom: 8px; border: 1px solid ${
-                    predictionLevel.borderColor
-                  };">
+                      <div style="background-color: ${predictionLevel.bgColor}; padding: 8px; border-radius: 4px; margin-bottom: 8px; border: 1px solid ${predictionLevel.borderColor};">
                         <p style="margin: 2px 0;"><strong>Model:</strong> ${modelName.toUpperCase()}</p>
-                        <p style="margin: 2px 0;"><strong>Zone:</strong> ${
-                          prediction.zone
-                        }</p>
-                        <p style="margin: 2px 0;"><strong>Plant ID:</strong> ${
-                          prediction.plant_id
-                        }</p>
-                        <p style="margin: 2px 0;"><strong>Cane Type:</strong> ${
-                          prediction.cane_type
-                        }</p>
+                        <p style="margin: 2px 0;"><strong>Zone:</strong> ${prediction.zone}</p>
+                        <p style="margin: 2px 0;"><strong>Plant ID:</strong> ${prediction.plant_id}</p>
+                        <p style="margin: 2px 0;"><strong>Cane Type:</strong> ${prediction.cane_type}</p>
+                        ${prediction.prediction_level ? `<p style="margin: 2px 0;"><strong>Level:</strong> ${prediction.prediction_level}</p>` : ''}
                       </div>
                       <div style="margin-bottom: 8px;">
                         <strong>Prediction Details:</strong><br/>
-                        <span style="display: inline-block; margin: 2px 4px 2px 0; padding: 4px 8px; background-color: ${
-                          predictionLevel.bgColor
-                        }; border-radius: 3px; font-size: 14px; border: 1px solid ${
-                    predictionLevel.borderColor
-                  };">
-                          <strong>Value:</strong> ${prediction.prediction.toFixed(
-                            3
-                          )}
+                        <span style="display: inline-block; margin: 2px 4px 2px 0; padding: 4px 8px; background-color: ${predictionLevel.bgColor}; border-radius: 3px; font-size: 14px; border: 1px solid ${predictionLevel.borderColor};">
+                          <strong>Value:</strong> ${prediction.prediction.toFixed(3)}
                         </span><br/>
-                        <span style="font-size: 12px; color: #666;">
-                          Range: ${prediction.prediction_lower_bound.toFixed(
-                            2
-                          )} - ${prediction.prediction_upper_bound.toFixed(2)}
+                        <span style="font-size: 11px; color: #888;">
+                          Threshold: ${prediction.prediction > PREDICTION_THRESHOLDS.HIGH_MIN ? '>12 (High)' : prediction.prediction < PREDICTION_THRESHOLDS.LOW_MAX ? '<10 (Low)' : '10-12 (Medium)'}
                         </span>
                       </div>
                       <div style="margin-bottom: 8px;">
                         <strong>Vegetation Indices:</strong><br/>
                         <span style="display: inline-block; margin: 1px 2px; padding: 2px 4px; background-color: #f3f4f6; border-radius: 2px; font-size: 11px;">
-                          NDVI: ${
-                            prediction.ndvi ? prediction.ndvi.toFixed(3) : "N/A"
-                          }
+                          NDVI: ${prediction.ndvi ? parseFloat(prediction.ndvi).toFixed(3) : "N/A"}
                         </span>
                         <span style="display: inline-block; margin: 1px 2px; padding: 2px 4px; background-color: #f3f4f6; border-radius: 2px; font-size: 11px;">
-                          NDWI: ${
-                            prediction.ndwi ? prediction.ndwi.toFixed(3) : "N/A"
-                          }
+                          NDWI: ${prediction.ndwi ? parseFloat(prediction.ndwi).toFixed(3) : "N/A"}
                         </span>
                         <span style="display: inline-block; margin: 1px 2px; padding: 2px 4px; background-color: #f3f4f6; border-radius: 2px; font-size: 11px;">
-                          GLI: ${
-                            prediction.gli ? prediction.gli.toFixed(3) : "N/A"
-                          }
+                          GLI: ${prediction.gli ? parseFloat(prediction.gli).toFixed(3) : "N/A"}
                         </span><br/>
                         <span style="display: inline-block; margin: 1px 2px; padding: 2px 4px; background-color: #f3f4f6; border-radius: 2px; font-size: 11px;">
-                          Precipitation: ${
-                            prediction.precipitation
-                              ? prediction.precipitation.toFixed(3)
-                              : "N/A"
-                          }
+                          Precipitation: ${prediction.precipitation ? parseFloat(prediction.precipitation).toFixed(3) : "N/A"}
                         </span>
                       </div>
                       <div style="font-size: 12px; color: #666;">
-                        <strong>Location:</strong> ${prediction.lat}, ${
-                    prediction.lon
-                  }
+                        <strong>Location:</strong> ${prediction.lat}, ${prediction.lon}
                       </div>
                     </div>
                   `;
 
-                  const predictionInfoWindow =
-                    new window.google.maps.InfoWindow({
-                      content: predictionInfoContent,
-                    });
+                  const predictionInfoWindow = new window.google.maps.InfoWindow({
+                    content: predictionInfoContent,
+                  });
 
                   predictionMarker.addListener("click", () => {
                     predictionInfoWindow.open(map, predictionMarker);
@@ -511,9 +481,7 @@ function Map({ center }) {
           });
         }
 
-        console.log(
-          `Map initialized with ${markersRef.current.length} markers`
-        );
+        console.log(`Map initialized with ${markersRef.current.length} markers`);
       }
     };
 
@@ -526,14 +494,14 @@ function Map({ center }) {
     appliedFilters,
     clearAllMarkers,
     getPredictionMarkerIcon,
+    getPredictionLevel,
+    useGroupedAPI,
   ]);
 
   const handleFilterChange = useCallback((key, value) => {
     setFilters((prev) => ({
       ...prev,
       [key]: value,
-      _t: Date.now(),
-      no_cache: true,
     }));
   }, []);
 
@@ -544,12 +512,9 @@ function Map({ center }) {
   const handleZoneFocus = useCallback(
     (zoneName) => {
       setFocusedZone(zoneName);
-
       setFilters((prev) => ({
         ...prev,
         zones: zoneName,
-        _t: Date.now(),
-        no_cache: true,
       }));
 
       if (mapInstance && zoneCenters[zoneName]) {
@@ -565,8 +530,6 @@ function Map({ center }) {
     setFilters((prev) => ({
       ...prev,
       zones: "MAC,MKB,MKS,MPDC,MPK,MPL,MPV,SB",
-      _t: Date.now(),
-      no_cache: true,
     }));
 
     if (mapInstance) {
@@ -621,11 +584,67 @@ function Map({ center }) {
         </div>
       )}
 
+      {/* Cache Info */}
+      {/* {cacheInfo && (
+        <div className="bg-green-50 border border-green-200 p-4 rounded-lg">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="text-green-600">⚡ Data loaded from cache</span>
+              <span className="text-xs text-green-700 bg-green-100 px-2 py-1 rounded">
+                {cacheInfo.timestamp}
+              </span>
+            </div>
+            <button
+              onClick={clearCache}
+              className="text-sm text-green-700 hover:text-green-800 underline"
+            >
+              Clear Cache
+            </button>
+          </div>
+          <div className="text-xs text-green-600 mt-1">
+            Cache Key: {cacheInfo.cache_key}
+          </div>
+        </div>
+      )} */}
+
       {/* Combined Filters and Zone Selection */}
       <div className="bg-white p-4 rounded-lg shadow">
         <h3 className="text-lg font-semibold mb-4">
           Prediction Filters & Zone Selection
         </h3>
+
+        {/* API Type Selection */}
+        {/* <div className="mb-6">
+          <label className="block text-sm font-medium mb-2">API Type</label>
+          <div className="flex gap-4">
+            <label className="flex items-center">
+              <input
+                type="radio"
+                name="apiType"
+                checked={useGroupedAPI}
+                onChange={() => setUseGroupedAPI(true)}
+                className="mr-2"
+              />
+              <span className="text-sm">Grouped API (Recommended)</span>
+            </label>
+            <label className="flex items-center">
+              <input
+                type="radio"
+                name="apiType"
+                checked={!useGroupedAPI}
+                onChange={() => setUseGroupedAPI(false)}
+                className="mr-2"
+              />
+              <span className="text-sm">Regular API</span>
+            </label>
+          </div>
+          <div className="text-xs text-gray-500 mt-1">
+            {useGroupedAPI 
+              ? "Uses /predict/grouped endpoint with better performance and caching"
+              : "Uses /predict endpoint (original behavior)"
+            }
+          </div>
+        </div> */}
 
         {/* Month Filter */}
         <div className="mb-6">
@@ -645,13 +664,33 @@ function Map({ center }) {
             {(() => {
               const monthData = getSelectedMonthData(selectedMonth);
               return monthData
-                ? `ปี: ${
-                    monthData.year
-                  } | Model: ${monthData.model.toUpperCase()} | Data range: Feb-Aug`
+                ? `ปี: ${monthData.year} | Model: ${monthData.model.toUpperCase()} | Data range: Feb-Aug`
                 : "Data range: Feb-Aug (fixed)";
             })()}
           </div>
         </div>
+
+        {/* Data Limit Filter */}
+        {/* <div className="mb-6">
+          <label className="block text-sm font-medium mb-1">Data Limit</label>
+          <select
+            value={dataLimit}
+            onChange={(e) => {
+              const newLimit = parseInt(e.target.value);
+              setDataLimit(newLimit);
+              handleFilterChange("limit", newLimit);
+            }}
+            className="w-full md:w-1/2 p-2 border rounded"
+          >
+            <option value={10000}>10,000 records (Fast)</option>
+            <option value={25000}>25,000 records (Medium)</option>
+            <option value={50000}>50,000 records (Recommended)</option>
+            <option value={100000}>100,000 records (Slow)</option>
+          </select>
+          <div className="text-xs text-gray-500 mt-1">
+            Higher limits may affect performance. Cached requests load instantly.
+          </div>
+        </div> */}
 
         {/* Zone Selection */}
         <div>
@@ -703,18 +742,57 @@ function Map({ center }) {
               <span className="text-xs bg-green-100 px-2 py-1 rounded">
                 {markersRef.current.length} markers loaded
               </span>
+              {useGroupedAPI && (
+                <span className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded">
+                  Grouped API
+                </span>
+              )}
             </div>
           </div>
 
           {predictionData.results.map((modelResult, modelIndex) => (
             <div key={modelIndex} className="mb-6">
-              <h4 className="text-md font-semibold mb-3 text-blue-600">
-                Model: {modelResult.model_name.toUpperCase()}
-                <span className="text-sm font-normal ml-2">
-                  (Overall Average: {modelResult.overall_average.toFixed(2)})
-                </span>
-              </h4>
+              <div className="flex justify-between items-center mb-3">
+                <h4 className="text-md font-semibold text-blue-600">
+                  Model: {modelResult.model_name.toUpperCase()}
+                  <span className="text-sm font-normal ml-2">
+                    (Overall Average: {modelResult.overall_average.toFixed(2)})
+                  </span>
+                </h4>
+                {modelResult.total_predictions && (
+                  <span className="text-sm text-gray-600">
+                    Total: {modelResult.total_predictions.toLocaleString()} predictions
+                  </span>
+                )}
+              </div>
 
+              {/* Grouped API - Show prediction groups */}
+              {useGroupedAPI && modelResult.prediction_groups && (
+                <div className="mb-4 p-3 bg-gray-50 rounded-lg">
+                  <h5 className="text-sm font-medium mb-2">Prediction Level Distribution:</h5>
+                  <div className="grid grid-cols-3 gap-4">
+                    {modelResult.prediction_groups.map((group, idx) => (
+                      <div key={idx} className="text-center">
+                        <div className={`text-lg font-bold ${
+                          group.level === 'HIGH' ? 'text-green-600' :
+                          group.level === 'MEDIUM' ? 'text-yellow-600' :
+                          'text-red-600'
+                        }`}>
+                          {group.count.toLocaleString()}
+                        </div>
+                        <div className="text-xs text-gray-600">
+                          {group.level} ({group.percentage.toFixed(1)}%)
+                        </div>
+                        <div className="text-xs text-gray-500">
+                          Avg: {group.average_prediction.toFixed(2)}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Zone Statistics Table */}
               {modelResult.zone_statistics && (
                 <div className="overflow-x-auto">
                   <table className="min-w-full table-auto">
@@ -746,18 +824,18 @@ function Map({ center }) {
                         <tr key={index} className="border-b">
                           <td className="px-4 py-2 font-medium">{zone.zone}</td>
                           <td className="px-4 py-2">
-                            {zone.total_plantations}
+                            {zone.total_plantations.toLocaleString()}
                           </td>
                           <td className="px-4 py-2 text-green-600">
-                            {zone.high_prediction_count} (
+                            {zone.high_prediction_count.toLocaleString()} (
                             {zone.high_prediction_percentage.toFixed(1)}%)
                           </td>
                           <td className="px-4 py-2 text-yellow-600">
-                            {zone.medium_prediction_count} (
+                            {zone.medium_prediction_count.toLocaleString()} (
                             {zone.medium_prediction_percentage.toFixed(1)}%)
                           </td>
                           <td className="px-4 py-2 text-red-600">
-                            {zone.low_prediction_count} (
+                            {zone.low_prediction_count.toLocaleString()} (
                             {zone.low_prediction_percentage.toFixed(1)}%)
                           </td>
                           <td className="px-4 py-2 font-semibold">
@@ -772,9 +850,7 @@ function Map({ center }) {
                                 }}
                               >
                                 {zone.high_prediction_percentage > 15
-                                  ? `${zone.high_prediction_percentage.toFixed(
-                                      1
-                                    )}%`
+                                  ? `${zone.high_prediction_percentage.toFixed(1)}%`
                                   : ""}
                               </div>
                               <div
@@ -784,9 +860,7 @@ function Map({ center }) {
                                 }}
                               >
                                 {zone.medium_prediction_percentage > 15
-                                  ? `${zone.medium_prediction_percentage.toFixed(
-                                      1
-                                    )}%`
+                                  ? `${zone.medium_prediction_percentage.toFixed(1)}%`
                                   : ""}
                               </div>
                               <div
@@ -796,24 +870,19 @@ function Map({ center }) {
                                 }}
                               >
                                 {zone.low_prediction_percentage > 15
-                                  ? `${zone.low_prediction_percentage.toFixed(
-                                      1
-                                    )}%`
+                                  ? `${zone.low_prediction_percentage.toFixed(1)}%`
                                   : ""}
                               </div>
                             </div>
                             <div className="flex justify-between text-xs text-gray-600 mt-1">
                               <span>
-                                High:{" "}
-                                {zone.high_prediction_percentage.toFixed(1)}%
+                                High: {zone.high_prediction_percentage.toFixed(1)}%
                               </span>
                               <span>
-                                Med:{" "}
-                                {zone.medium_prediction_percentage.toFixed(1)}%
+                                Med: {zone.medium_prediction_percentage.toFixed(1)}%
                               </span>
                               <span>
-                                Low: {zone.low_prediction_percentage.toFixed(1)}
-                                %
+                                Low: {zone.low_prediction_percentage.toFixed(1)}%
                               </span>
                             </div>
                           </td>
@@ -848,7 +917,7 @@ function Map({ center }) {
           <div className="mt-2 text-xs text-blue-600">
             {loadingProgress === 100
               ? "Prediction analysis complete!"
-              : `Processing ${dataLimit.toLocaleString()} records with memory optimization...`}
+              : `Processing ${dataLimit.toLocaleString()} records with ${useGroupedAPI ? 'grouped API and ' : ''}memory optimization...`}
           </div>
         </div>
       )}
@@ -864,15 +933,14 @@ function Map({ center }) {
             Please modify your filters and click &quot;Apply Changes&quot; to try again.
           </p>
           <p className="text-blue-600 text-xs mt-1">
-            💡 Try selecting a different month or reducing the data limit for
-            better performance.
+            💡 Try selecting a different month, reducing the data limit, or switching to {useGroupedAPI ? 'regular' : 'grouped'} API for better performance.
           </p>
         </div>
       )}
 
-      {/* Legend for Map Markers */}
+      {/* Updated Legend for Map Markers */}
       <div className="bg-white p-4 rounded-lg shadow">
-        <h3 className="text-lg font-semibold mb-4">Map Legend</h3>
+        <h3 className="text-lg font-semibold mb-4">Map Legend & Prediction Thresholds</h3>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
             <h4 className="font-medium mb-2">Zone Markers</h4>
@@ -886,29 +954,67 @@ function Map({ center }) {
             </div>
           </div>
           <div>
-            <h4 className="font-medium mb-2">Prediction Levels</h4>
+            <h4 className="font-medium mb-2">Prediction Levels (Fixed Thresholds)</h4>
             <div className="space-y-1">
               <div className="flex items-center gap-2">
                 <div className="w-4 h-4 rounded-full bg-green-500"></div>
-                <span className="text-sm">High Prediction (&gt; 12)</span>
+                <span className="text-sm">High Prediction (&gt; 12.0)</span>
               </div>
               <div className="flex items-center gap-2">
                 <div className="w-4 h-4 rounded-full bg-yellow-500"></div>
-                <span className="text-sm">Medium Prediction (10-12)</span>
+                <span className="text-sm">Medium Prediction (10.0 - 12.0)</span>
               </div>
               <div className="flex items-center gap-2">
                 <div className="w-4 h-4 rounded-full bg-red-500"></div>
-                <span className="text-sm">Low Prediction (&lt; 10)</span>
+                <span className="text-sm">Low Prediction (&lt; 10.0)</span>
               </div>
             </div>
           </div>
         </div>
         <div className="mt-3 text-xs text-gray-600">
-          💡 Click on any marker to see detailed prediction information
-          including vegetation indices, model confidence ranges, and location
-          data.
+          💡 Click on any marker to see detailed prediction information including vegetation indices, exact thresholds, and location data.
+          {useGroupedAPI && (
+            <span className="block mt-1">
+              🚀 Using Grouped API for better performance and automatic caching.
+            </span>
+          )}
         </div>
       </div>
+
+      {/* API Status and Performance Info */}
+      {/* <div className="bg-white p-4 rounded-lg shadow">
+        <h3 className="text-lg font-semibold mb-4">API Performance & Status</h3>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="text-center">
+            <div className="text-2xl font-bold text-blue-600">
+              {useGroupedAPI ? 'Grouped' : 'Regular'}
+            </div>
+            <div className="text-sm text-gray-600">API Type</div>
+          </div>
+          <div className="text-center">
+            <div className="text-2xl font-bold text-green-600">
+              {dataLimit.toLocaleString()}
+            </div>
+            <div className="text-sm text-gray-600">Record Limit</div>
+          </div>
+          <div className="text-center">
+            <div className="text-2xl font-bold text-purple-600">
+              {markersRef.current.length.toLocaleString()}
+            </div>
+            <div className="text-sm text-gray-600">Map Markers</div>
+          </div>
+        </div>
+        
+        <div className="mt-4 p-3 bg-gray-50 rounded-lg">
+          <h4 className="font-medium mb-2">Performance Tips:</h4>
+          <ul className="text-sm text-gray-700 space-y-1">
+            <li>• Use <strong>Grouped API</strong> for better performance and caching</li>
+            <li>• Cached requests load instantly (look for ⚡ cache indicator)</li>
+            <li>• Lower data limits improve response times</li>
+            <li>• Focus on specific zones to reduce markers count</li>
+          </ul>
+        </div>
+      </div> */}
 
       {/* Map */}
       <div className="w-full">

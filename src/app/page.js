@@ -25,6 +25,7 @@ function Map({ center }) {
     { value: 1, label: "มกราคม", year: 2025, model: "m1" },
     { value: 2, label: "กุมภาพันธ์", year: 2025, model: "m2" },
     { value: 3, label: "มีนาคม", year: 2025, model: "m3" },
+    { value: 4, label: "เมษายน", year: 2025, model: "m4" },
   ], []);
 
   // ฟังก์ชันสำหรับหาข้อมูลเดือนที่เลือก
@@ -612,7 +613,7 @@ function Map({ center }) {
       )}
 
       {/* Cache Info */}
-      {/* {cacheInfo && (
+      {cacheInfo && (
         <div className="bg-green-50 border border-green-200 p-3 rounded-lg">
           <div className="flex items-center justify-between">
             <div>
@@ -627,7 +628,7 @@ function Map({ center }) {
             </button>
           </div>
         </div>
-      )} */}
+      )}
 
       {/* Combined Filters and Zone Selection */}
       <div className="bg-white p-4 rounded-lg shadow">
